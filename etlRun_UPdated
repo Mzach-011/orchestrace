@@ -1,0 +1,109 @@
+USE [DWH_ADMIN]
+GO
+
+/****** Object:  View [etl].[v_EtlRunManage]    Script Date: 20.06.2025 0:14:24 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CREATE OR ALTER                   view 
+[etl].[v_EtlRunManage] as
+with
+LastRunStatus as
+(select 
+ER.RunID,
+ER.FrequencyName,
+ER.RunStatus,
+ER.RunFinishTime,
+ROW_NUMBER() over (partition by ER.FrequencyName order by ER.RunFinishTime DESC) as RN
+from [etl].EtlRun ER),
+base as 
+(select 
+EF.FrequencyName,
+max(case when upper(ER.RunStatus)='FINISHED' then ER.RunFinishTime else null end) as LastRunDate,
+max(case when upper(ER.RunStatus) in ('RUNNING','STARTED') then 1 else 0 end) as RunningFlag,
+LRS.RunStatus LastRunStatus,	--Last run status
+LRS.RunFinishTime as LastRunFinishTime,
+EFS.Priority
+from 
+[etl].EtlFrequency EF
+join [etl].EtlFrequencySchedule EFS
+on EFS.FrequencyName = EF.FrequencyName
+and EFS.ScheduledFlag = 1
+left join [etl].EtlRun ER
+on ER.FrequencyName = EF.FrequencyName
+left join LastRunStatus LRS
+on LRS.FrequencyName = EF.FrequencyName
+and LRS.RN = 1
+group by EF.FrequencyName,LRS.RunStatus, LRS.RunFinishTime, EFS.Priority )
+,RunEligibility as
+(select 
+FrequencyName,
+LastRunDate,
+RunningFlag,
+Priority,
+StartRunFlag =	-- Determines if the run ran for longer it was his frequency or if it ended in error
+------ CASY NA SPOUSTENI JEDNOTLIVYCH TYPU RUNU
+case  
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='HOURLY' AND ( DATEADD(HOUR, 1, LastRunDate)<GETDATE() OR LastRunDate IS NULL ) ) THEN 1--Aby mi řekl, jestli se má po hodině spustit znovu
+
+
+when ( (RunningFlag is null or RunningFlag = 0)
+	and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) 
+	and FrequencyName='DAILY' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) 
+	and DATEPART(HOUR, GETDATE()) >= (SELECT parameterValue from [DWH_Admin].[dbo].[DWH_operationParameter] where parameterName = 'RUN_FROM')) 
+	AND EXISTS (
+            SELECT 1
+            FROM DWH_L0_Landing.I_Tarvos._PUMP_DWH_STATISTIC
+            WHERE D_DWH_DONE = DATEADD(DD, -1, CAST(GETDATE() AS DATE))
+        --      AND TABLE_NAME IN ('ZP_PORIZ_PREDMETU_UVERU', 'TRANS_ZAPIS', 'UCET_MENA_DWH_PARAM')
+			  AND TABLE_NAME IN ('ACTION_QUEUE')
+        --      AND ERROR = 0
+            GROUP BY D_DWH_DONE
+            HAVING COUNT(DISTINCT TABLE_NAME) = 1)
+	then 1 --Aby mi řekl, jestli se má za den spustit znovu
+
+
+
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='EVERY 10 MINUTES' AND ( DATEADD(MINUTE, 10, LastRunDate)<GETDATE() OR LastRunDate IS NULL) ) THEN 1--ukazka jak pridat dalsi
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='DCS_DAILY_18' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) and DATEPART(HOUR, GETDATE()) >= '14') then 1  -- 14 prozatím pro testování
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='DAILY_MONEY' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) and DATEPART(HOUR, GETDATE()) >= '0') then 1 
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='METADA_OnlnCore' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) and DATEPART(HOUR, GETDATE()) >= '0') then 1 
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='ADHOC_MONEY'  AND GETDATE() <= DATEADD(MINUTE, 5, (SELECT TriggerTime  FROM DWH_ADmin.[etl].[EtlAdhocRunTrigger]  WHERE AdhocrunTriggerId = (SELECT MAX(AdhocrunTriggerId) FROM DWH_ADmin.[etl].[EtlAdhocRunTrigger]  WHERE AdHocRunTriggerType = 'ADHOC_MONEY')))) then 1 -- trochu komplikovaná logika, ale funkční 
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='CCM' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) and DATEPART(HOUR, GETDATE()) >= '1') then 1 
+
+when ( (RunningFlag is null or RunningFlag = 0) and (LastRunStatus not in ('ERROR' ) or LastRunStatus is null) and FrequencyName='DAILY_MDM' AND ( CONVERT(date, LastRunDate)<CONVERT(date, GETDATE()) OR LastRunDate IS NULL ) and DATEPART(HOUR, GETDATE()) >= '1') then 1 
+
+
+else 0
+------------- KONEC CASU NA JEDNOTLIVE TYPY RUNU
+end
+from base
+)
+select 
+FrequencyName,
+StartRunFlag,
+ROW_NUMBER() over (order by case when StartRunFlag = 1 then priority else 9999 end) as SchedulePriority
+from
+RunEligibility 
+GO
+
+
